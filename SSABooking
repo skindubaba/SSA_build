@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sports Field Booking</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://js.paystack.co/v2/inline.js"></script> <!-- Paystack Inline JS -->
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .tab-active {
+            border-color: #4F46E5; /* indigo-600 */
+            color: #4F46E5;
+            background-color: #EEF2FF; /* indigo-100 */
+        }
+        .slot {
+            transition: all 0.2s ease-in-out;
+        }
+        .slot-available:hover {
+            background-color: #D1FAE5; /* green-100 */
+            border-color: #10B981; /* green-500 */
+        }
+        .slot-booked {
+            background-color: #FEE2E2; /* red-200 */
+            color: #991B1B; /* red-800 */
+            cursor: not-allowed;
+        }
+        .slot-selected {
+            background-color: #BFDBFE; /* blue-200 */
+            border-color: #3B82F6; /* blue-500 */
+        }
+        /* Custom modal styles */
+        .modal {
+            display: none; /* Hidden by default */
+            position: fixed; /* Stay in place */
+            z-index: 100; /* Sit on top */
+            left: 0;
+            top: 0;
+            width: 100%; /* Full width */
+            height: 100%; /* Full height */
+            overflow: auto; /* Enable scroll if needed */
+            background-color: rgba(0,0,0,0.4); /* Black w/ opacity */
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 10% auto; /* 10% from the top and centered */
+            padding: 20px;
+            border: 1px solid #888;
+            width: 90%; /* Could be more or less, depending on screen size */
+            max-width: 500px;
+            border-radius: 0.5rem;
+        }
+        .close-button {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+        }
+        .close-button:hover,
+        .close-button:focus {
+            color: black;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <!-- Firebase and Alpine.js (for simple reactivity) -->
+    <script type="module">
+        import { initializeApp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, addDoc, collection, query, where, getDocs, Timestamp, onSnapshot, updateDoc, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase Configuration ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "YOUR_API_KEY", // Replace if __firebase_config is not available
+            authDomain: "YOUR_AUTH_DOMAIN",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_STORAGE_BUCKET",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'sports-field-booking-default';
+
+        // --- Initialize Firebase ---
+        let app, auth, db;
+        let currentUserId = null; 
+        let isAuthReady = false;
+        let alpineReady = false; // Flag to track Alpine.js initialization
+
+        try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+            setLogLevel('debug'); 
+            console.log("Firebase initialized successfully.");
+        } catch (error) {
+            console.error("Firebase initialization error:", error);
+            const loadingMsgEl = document.getElementById('loadingMessage');
+            if (loadingMsgEl) loadingMsgEl.innerText = "Error initializing Firebase. Please check console.";
+        }
+        
+        // --- Authentication ---
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                currentUserId = user.uid;
+                console.log("User authenticated:", currentUserId);
+                const userDisplayEl = document.getElementById('currentUserDisplay');
+                if (userDisplayEl) userDisplayEl.innerText = `User ID: ${currentUserId}`;
+                isAuthReady = true;
+            } else {
+                console.log("User not authenticated, attempting sign-in...");
+                isAuthReady = false; 
+                currentUserId = null;
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                         console.log("Signed in with custom token.");
+                    } else {
+                        await signInAnonymously(auth);
+                        console.log("Signed in anonymously.");
+                    }
+                } catch (error) {
+                    console.error("Error signing in:", error);
+                    const loadingMsgEl = document.getElementById('loadingMessage');
+                    if (loadingMsgEl) loadingMsgEl.innerText = "Error signing in. Please check console.";
+                }
+            }
+
+            if (alpineReady && window.alpineApp) {
+                console.log("Auth state changed, Alpine ready, calling initApp from onAuthStateChanged.");
+                await window.alpineApp.initApp();
+            }
+        });
+
+        // --- Alpine.js Data Store ---
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('appData', () => ({
+                // --- App State ---
+                isLoading: true, 
+                isGeminiLoading: false, // For Gemini API calls
+                currentView: 'schedule', 
+                message: { text: '', type: 'info' }, 
+                geminiSuggestion: '', // To store suggestions from Gemini
+                
+                // --- User Info ---
+                userName: '',
+                userEmail: '',
+
+                // --- Field Details ---
+                field: {
+                    id: 'main_football_pitch',
+                    name: 'Main Football Pitch',
+                    hourlyRateNGN: 5000, 
+                    operatingHours: { start: 8, end: 22 } 
+                },
+                timeSlots: [],
+
+                // --- Booking State ---
+                selectedDate: new Date().toISOString().split('T')[0],
+                selectedSlot: null, 
+                bookedSlotsForDate: [], 
+
+                // --- Data ---
+                myBookings: [],
+                allBookingsAdmin: [],
+                bookingToCancelId: null,
+
+                // --- Paystack Config ---
+                paystackPublicKey: 'pk_test_YOUR_PAYSTACK_PUBLIC_KEY', // REPLACE!
+
+                // --- Initialization ---
+                async initApp() {
+                    console.log("Alpine initApp called. Auth ready:", isAuthReady, "Current User ID:", currentUserId);
+                    
+                    if (!isAuthReady || !currentUserId) {
+                        console.warn("Auth not fully ready or user ID not set, deferring full app data load.");
+                        this.isLoading = true; 
+                        return;
+                    }
+                    
+                    this.isLoading = true; 
+                    this.userEmail = localStorage.getItem('sportsBookingUserEmail') || '';
+                    this.userName = localStorage.getItem('sportsBookingUserName') || '';
+
+                    if (!this.userEmail && currentUserId) {
+                        this.userEmail = `${currentUserId.substring(0,10)}@example.com`; 
+                        localStorage.setItem('sportsBookingUserEmail', this.userEmail);
+                    }
+                    if (!this.userName && currentUserId){
+                        this.userName = "User " + currentUserId.substring(0,6); 
+                        localStorage.setItem('sportsBookingUserName', this.userName);
+                    }
+
+                    await this.generateTimeSlots();
+                    await this.fetchBookingsForDate(); // This will also clear old geminiSuggestion
+                    await this.fetchMyBookings();
+                    if (this.currentView === 'adminBookings') {
+                        await this.fetchAdminBookings();
+                    }
+                    
+                    this.isLoading = false;
+                    const loadingMsgEl = document.getElementById('loadingMessage');
+                    if (loadingMsgEl) loadingMsgEl.style.display = 'none';
+                    const mainContentEl = document.getElementById('mainContent');
+                    if (mainContentEl) mainContentEl.style.display = 'block';
+                    console.log("App initialized and content displayed.");
+                },
+
+                // --- UI Navigation ---
+                setView(view) {
+                    this.currentView = view;
+                    this.message.text = ''; 
+                    this.geminiSuggestion = ''; // Clear suggestions when view changes
+                    if (view === 'myBookings') this.fetchMyBookings();
+                    if (view === 'adminBookings') this.fetchAdminBookings();
+                    if (view === 'schedule') this.fetchBookingsForDate();
+                },
+
+                // --- Date and Time Slot Logic ---
+                async generateTimeSlots() {
+                    this.timeSlots = [];
+                    const { start, end } = this.field.operatingHours;
+                    for (let hour = start; hour < end; hour++) {
+                        const startTime = `${hour.toString().padStart(2, '0')}:00`;
+                        const endTime = `${(hour + 1).toString().padStart(2, '0')}:00`;
+                        this.timeSlots.push({ startTime, endTime });
+                    }
+                },
+                
+                async handleDateChange(event) {
+                    this.selectedDate = event.target.value;
+                    this.selectedSlot = null; 
+                    this.geminiSuggestion = ''; // Clear suggestion on date change
+                    await this.fetchBookingsForDate();
+                },
+
+                selectSlot(slot) {
+                    if (this.isSlotBooked(slot.startTime)) return;
+                    this.selectedSlot = this.selectedSlot?.startTime === slot.startTime ? null : slot;
+                },
+
+                isSlotBooked(startTime) {
+                    // Ensure bookedSlotsForDate is an array and has items before calling some
+                    if (!Array.isArray(this.bookedSlotsForDate) || this.bookedSlotsForDate.length === 0) {
+                        return false;
+                    }
+                    return this.bookedSlotsForDate.some(b => b.startTime === startTime && (b.status === 'confirmed' || b.status === 'pending_approval'));
+                },
+
+                getSlotStatusClass(slot) {
+                    if (this.isSlotBooked(slot.startTime)) return 'slot-booked';
+                    if (this.selectedSlot?.startTime === slot.startTime) return 'slot-selected';
+                    return 'slot-available border-gray-300 hover:border-indigo-500';
+                },
+
+                // --- Firestore Operations ---
+                async fetchBookingsForDate() {
+                    if (!db || !this.selectedDate || !isAuthReady || !currentUserId) {
+                        console.warn("Firestore not ready, date/auth not selected for fetchBookingsForDate");
+                        this.bookedSlotsForDate = [];
+                        this.geminiSuggestion = ''; // Clear suggestion if prerequisites not met
+                        return;
+                    }
+                    this.isLoading = true;
+                    this.geminiSuggestion = ''; // Clear previous suggestions
+                    const bookingsColPath = `artifacts/${appId}/public/data/bookings`;
+                    const q = query(collection(db, bookingsColPath), where("bookingDate", "==", this.selectedDate), where("fieldId", "==", this.field.id));
+                    
+                    try {
+                        const querySnapshot = await getDocs(q);
+                        this.bookedSlotsForDate = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                        console.log(`Fetched ${this.bookedSlotsForDate.length} bookings for ${this.selectedDate}`);
+                    } catch (error) {
+                        console.error("Error fetching bookings for date:", error);
+                        this.showMessage(`Error fetching schedule: ${error.message}`, 'error');
+                        this.bookedSlotsForDate = [];
+                    } finally {
+                        this.isLoading = false;
+                    }
+                },
+
+                // --- Gemini API Integration ---
+                async getGeminiScheduleSuggestion() {
+                    if (!this.selectedDate) {
+                        this.showMessage("Please select a date first.", "error");
+                        return;
+                    }
+                    this.isGeminiLoading = true;
+                    this.geminiSuggestion = "✨ Thinking...";
+
+                    const bookedStartTimes = this.bookedSlotsForDate
+                        .filter(b => b.status === 'confirmed' || b.status === 'pending_approval')
+                        .map(b => b.startTime)
+                        .join(", ") || "None";
+
+                    const prompt = `You are a friendly and helpful assistant for the "${this.field.name}" booking system.
+The field operates from ${this.field.operatingHours.start}:00 to ${this.field.operatingHours.end}:00.
+For the selected date, ${this.formatDateOnly(this.selectedDate)}, the following 1-hour slots are already booked: ${bookedStartTimes}.
+All other 1-hour slots between operating hours are currently available.
+Please analyze this schedule and suggest 2-3 good available time slots or periods for a user looking to book.
+Be conversational and helpful. For example, mention if the morning, afternoon or evening is generally more open.
+If the day is very full, acknowledge that and highlight any remaining options, or gently suggest checking another date if it's almost fully booked.
+If the day is wide open, highlight the flexibility. Keep your suggestion concise, about 2-4 sentences.`;
+
+                    try {
+                        let chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+                        const payload = { contents: chatHistory };
+                        const apiKey = ""; // For gemini-2.0-flash, API key is handled by the environment if empty
+                        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+                        
+                        const response = await fetch(apiUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (!response.ok) {
+                            const errorBody = await response.text();
+                            throw new Error(`API request failed with status ${response.status}: ${errorBody}`);
+                        }
+
+                        const result = await response.json();
+
+                        if (result.candidates && result.candidates.length > 0 &&
+                            result.candidates[0].content && result.candidates[0].content.parts &&
+                            result.candidates[0].content.parts.length > 0) {
+                            this.geminiSuggestion = result.candidates[0].content.parts[0].text;
+                        } else {
+                            console.error("Unexpected response structure from Gemini API:", result);
+                            this.geminiSuggestion = "Sorry, I couldn't get a suggestion right now. The schedule data might be unusual.";
+                        }
+                    } catch (error) {
+                        console.error("Error calling Gemini API:", error);
+                        this.geminiSuggestion = `Sorry, an error occurred while getting suggestions: ${error.message}. Please try again.`;
+                        this.showMessage(this.geminiSuggestion, 'error') // Also show in main message area
+                    } finally {
+                        this.isGeminiLoading = false;
+                    }
+                },
+
+
+                async submitBooking() {
+                    // ... (submitBooking logic remains largely the same)
+                    if (!this.selectedSlot || !this.selectedDate || !this.userName.trim() || !this.userEmail.trim()) {
+                        this.showMessage('Please select a slot, enter your name and a valid email.', 'error');
+                        return;
+                    }
+                    if (!currentUserId) {
+                        this.showMessage('Authentication error. Cannot proceed with booking.', 'error');
+                        return;
+                    }
+
+                    localStorage.setItem('sportsBookingUserEmail', this.userEmail);
+                    localStorage.setItem('sportsBookingUserName', this.userName);
+
+
+                    const bookingDetails = {
+                        userId: currentUserId,
+                        userName: this.userName,
+                        userEmail: this.userEmail,
+                        fieldId: this.field.id,
+                        fieldName: this.field.name,
+                        bookingDate: this.selectedDate,
+                        startTime: this.selectedSlot.startTime,
+                        endTime: this.selectedSlot.endTime,
+                        priceNGN: this.field.hourlyRateNGN,
+                        status: 'pending_payment', 
+                        bookedAt: Timestamp.now()
+                    };
+
+                    this.isLoading = true;
+                    console.log("Simulating Paystack Payment Initialization...");
+                    this.showMessage('Redirecting to Paystack for payment...', 'info');
+
+                    const paystack = new PaystackPop();
+                    paystack.newTransaction({
+                        key: this.paystackPublicKey, 
+                        email: bookingDetails.userEmail,
+                        amount: bookingDetails.priceNGN * 100, 
+                        currency: 'NGN',
+                        ref: `sfb_${appId}_${Date.now()}`, 
+                        metadata: {
+                            custom_fields: [
+                                {
+                                    display_name: "Booking For",
+                                    variable_name: "booking_for",
+                                    value: `${bookingDetails.fieldName} on ${bookingDetails.bookingDate} at ${bookingDetails.startTime}`
+                                }
+                            ]
+                        },
+                        onSuccess: async (transaction) => {
+                            console.log('Paystack mock success:', transaction);
+                            bookingDetails.paymentReference = transaction.reference;
+                            bookingDetails.status = 'pending_approval'; 
+                            
+                            try {
+                                const bookingsColPath = `artifacts/${appId}/public/data/bookings`;
+                                const docRef = await addDoc(collection(db, bookingsColPath), bookingDetails);
+                                console.log("Booking added with ID: ", docRef.id);
+                                this.showMessage('Booking successful! Pending admin approval.', 'success');
+                                this.selectedSlot = null;
+                                await this.fetchBookingsForDate(); 
+                                await this.fetchMyBookings(); 
+                                this.closeModal('bookingModal');
+                            } catch (error) {
+                                console.error("Error saving booking after payment:", error);
+                                this.showMessage(`Error saving booking: ${error.message}. Please contact support with payment ref: ${transaction.reference}`, 'error');
+                            } finally {
+                                this.isLoading = false;
+                            }
+                        },
+                        onCancel: () => {
+                            console.log('Paystack payment cancelled by user.');
+                            this.showMessage('Payment cancelled.', 'info');
+                            this.isLoading = false;
+                            this.closeModal('bookingModal');
+                        },
+                        onError: (error) => {
+                            console.error('Paystack error:', error);
+                            this.showMessage(`Paystack error: ${error.message}`, 'error');
+                            this.isLoading = false;
+                            this.closeModal('bookingModal');
+                        }
+                    });
+                },
+
+                async fetchMyBookings() {
+                    // ... (fetchMyBookings logic remains the same)
+                    if (!db || !currentUserId || !isAuthReady) {
+                        console.warn("Firestore or user not ready for fetchMyBookings");
+                        this.myBookings = [];
+                        return;
+                    }
+                    this.isLoading = true;
+                    const bookingsColPath = `artifacts/${appId}/public/data/bookings`;
+                    const q = query(collection(db, bookingsColPath), where("userId", "==", currentUserId)); 
+                    
+                    try {
+                        const querySnapshot = await getDocs(q);
+                        this.myBookings = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => b.bookedAt.toDate() - a.bookedAt.toDate()); 
+                        console.log(`Fetched ${this.myBookings.length} bookings for user ${currentUserId}`);
+                    } catch (error) {
+                        console.error("Error fetching user bookings:", error);
+                        this.showMessage(`Error fetching your bookings: ${error.message}`, 'error');
+                        this.myBookings = [];
+                    } finally {
+                        this.isLoading = false;
+                    }
+                },
+                
+                promptCancelBooking(bookingId) {
+                    // ... (promptCancelBooking logic remains the same)
+                    const bookingToCancel = this.myBookings.find(b => b.id === bookingId);
+                     if (!bookingToCancel || bookingToCancel.userId !== currentUserId) {
+                         this.showMessage('Error: Booking not found or unauthorized for cancellation.', 'error');
+                         return;
+                    }
+                    if (bookingToCancel.status === 'cancelled_by_user' || bookingToCancel.status === 'rejected_by_admin') {
+                        this.showMessage('This booking is already cancelled or rejected.', 'info');
+                        return;
+                    }
+                    this.bookingToCancelId = bookingId;
+                    const modalEl = document.getElementById('cancelConfirmModal');
+                    if (modalEl) modalEl.style.display = 'block';
+                },
+
+                async executeCancellation() {
+                    // ... (executeCancellation logic remains the same)
+                     if (!this.bookingToCancelId || !db || !isAuthReady || !currentUserId) {
+                        this.showMessage('Cannot proceed with cancellation. Required information missing.', 'error');
+                        this.closeModal('cancelConfirmModal');
+                        return;
+                    }
+                    
+                    this.isLoading = true; 
+                    const bookingDocPath = `artifacts/${appId}/public/data/bookings/${this.bookingToCancelId}`;
+                    const bookingDocRef = doc(db, bookingDocPath);
+
+                    try {
+                        const bookingToCancel = this.myBookings.find(b => b.id === this.bookingToCancelId);
+                         if (!bookingToCancel || bookingToCancel.userId !== currentUserId) { 
+                             this.showMessage('Error: Booking not found or unauthorized for cancellation.', 'error');
+                             this.isLoading = false;
+                             this.closeModal('cancelConfirmModal');
+                             this.bookingToCancelId = null;
+                             return;
+                        }
+
+                        if (bookingToCancel.status === 'confirmed' || bookingToCancel.status === 'pending_approval') {
+                             await updateDoc(bookingDocRef, { status: 'cancelled_by_user', cancelledAt: Timestamp.now() });
+                             this.showMessage('Booking cancelled successfully.', 'success');
+                             await this.fetchMyBookings();
+                             await this.fetchBookingsForDate(); 
+                        } else {
+                            this.showMessage('This booking cannot be cancelled (it might already be cancelled or in a non-cancellable state).', 'info');
+                        }
+                    } catch (error) {
+                        console.error("Error cancelling booking:", error);
+                        this.showMessage(`Error cancelling booking: ${error.message}`, 'error');
+                    } finally {
+                        this.isLoading = false;
+                        this.closeModal('cancelConfirmModal');
+                        this.bookingToCancelId = null;
+                    }
+                },
+
+                // --- Admin Functions ---
+                async fetchAdminBookings() {
+                    // ... (fetchAdminBookings logic remains the same)
+                     if (!db || !isAuthReady || !currentUserId ) { 
+                         console.warn("Firestore not ready for fetchAdminBookings");
+                         this.allBookingsAdmin = [];
+                         return;
+                    }
+                    this.isLoading = true;
+                    const bookingsColPath = `artifacts/${appId}/public/data/bookings`;
+                    const q = query(collection(db, bookingsColPath)); 
+                    
+                    try {
+                        const querySnapshot = await getDocs(q);
+                        this.allBookingsAdmin = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => b.bookedAt.toDate() - a.bookedAt.toDate());
+                        console.log(`Fetched ${this.allBookingsAdmin.length} total bookings for admin view.`);
+                    } catch (error) {
+                        console.error("Error fetching all bookings for admin:", error);
+                        this.showMessage(`Error fetching admin bookings: ${error.message}`, 'error');
+                        this.allBookingsAdmin = [];
+                    } finally {
+                        this.isLoading = false;
+                    }
+                },
+
+                async approveBooking(bookingId) {
+                    // ... (approveBooking logic remains the same)
+                    if (!db || !isAuthReady) return;
+                    this.isLoading = true;
+                     const bookingDocPath = `artifacts/${appId}/public/data/bookings/${bookingId}`;
+                    const bookingDocRef = doc(db, bookingDocPath);
+                    try {
+                        await updateDoc(bookingDocRef, { status: 'confirmed', approvedAt: Timestamp.now() });
+                        this.showMessage('Booking approved successfully!', 'success');
+                        await this.fetchAdminBookings(); 
+                        const approvedBooking = this.allBookingsAdmin.find(b => b.id === bookingId);
+                        if (approvedBooking && approvedBooking.bookingDate === this.selectedDate) {
+                            await this.fetchBookingsForDate();
+                        }
+                         if (currentUserId && approvedBooking && approvedBooking.userId === currentUserId) {
+                            await this.fetchMyBookings();
+                        }
+                    } catch (error) {
+                        console.error("Error approving booking:", error);
+                        this.showMessage(`Error approving booking: ${error.message}`, 'error');
+                    } finally {
+                        this.isLoading = false;
+                    }
+                },
+
+                 async rejectBooking(bookingId) {
+                    // ... (rejectBooking logic remains the same)
+                    if (!db || !isAuthReady) return;
+                    this.isLoading = true;
+                    const bookingDocPath = `artifacts/${appId}/public/data/bookings/${bookingId}`;
+                    const bookingDocRef = doc(db, bookingDocPath);
+                    try {
+                        await updateDoc(bookingDocRef, { status: 'rejected_by_admin', rejectedAt: Timestamp.now() });
+                        this.showMessage('Booking rejected.', 'success');
+                        await this.fetchAdminBookings();
+                         const rejectedBooking = this.allBookingsAdmin.find(b => b.id === bookingId);
+                        if (rejectedBooking && rejectedBooking.bookingDate === this.selectedDate) {
+                            await this.fetchBookingsForDate(); 
+                        }
+                         if (currentUserId && rejectedBooking && rejectedBooking.userId === currentUserId) {
+                            await this.fetchMyBookings();
+                        }
+                    } catch (error) {
+                        console.error("Error rejecting booking:", error);
+                        this.showMessage(`Error rejecting booking: ${error.message}`, 'error');
+                    } finally {
+                        this.isLoading = false;
+                    }
+                },
+
+                // --- Utility ---
+                formatDate(timestamp) {
+                    // ... (formatDate logic remains the same)
+                    if (!timestamp) return 'N/A';
+                    return timestamp.toDate().toLocaleString('en-NG', { dateStyle: 'medium', timeStyle: 'short' });
+                },
+                formatDateOnly(dateString) {
+                    // ... (formatDateOnly logic remains the same)
+                    if (!dateString) return 'N/A';
+                    const date = new Date(dateString);
+                    return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+                           .toLocaleDateString('en-NG', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+                },
+                getStatusColor(status) {
+                    // ... (getStatusColor logic remains the same)
+                    switch (status) {
+                        case 'pending_payment': return 'bg-yellow-100 text-yellow-800';
+                        case 'pending_approval': return 'bg-blue-100 text-blue-800';
+                        case 'confirmed': return 'bg-green-100 text-green-800';
+                        case 'cancelled_by_user': return 'bg-red-100 text-red-800';
+                        case 'rejected_by_admin': return 'bg-pink-100 text-pink-800';
+                        default: return 'bg-gray-100 text-gray-800';
+                    }
+                },
+                showMessage(text, type = 'info') {
+                    this.message = { text, type };
+                },
+                openModal(modalId) {
+                    // ... (openModal logic remains the same)
+                     if (!this.selectedSlot) {
+                        this.showMessage('Please select a time slot first.', 'error');
+                        return;
+                    }
+                    if (!this.userEmail.trim()) { 
+                        const email = prompt("Please enter your email address to proceed with the booking:");
+                        if (email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { 
+                            this.userEmail = email;
+                             localStorage.setItem('sportsBookingUserEmail', this.userEmail);
+                        } else {
+                            this.showMessage('A valid email is required to book.', 'error');
+                            return;
+                        }
+                    }
+                     if (!this.userName.trim()) { 
+                        const name = prompt("Please enter your full name for the booking:");
+                        if (name && name.trim().length > 0) {
+                            this.userName = name.trim();
+                            localStorage.setItem('sportsBookingUserName', this.userName);
+                        } else {
+                            this.showMessage('Your name is required to book.', 'error');
+                            return;
+                        }
+                    }
+                    const modalEl = document.getElementById(modalId);
+                    if(modalEl) modalEl.style.display = 'block';
+                },
+                closeModal(modalId) {
+                    // ... (closeModal logic remains the same)
+                    const modalEl = document.getElementById(modalId);
+                    if(modalEl) modalEl.style.display = 'none';
+                },
+            }));
+            
+            window.alpineApp = Alpine.store('appData'); 
+            alpineReady = true; 
+
+            if (window.alpineApp) {
+                console.log("Alpine initialized, calling initApp for the first time.");
+                window.alpineApp.initApp(); 
+            } else {
+                console.error("Alpine store 'appData' not found after alpine:init.");
+                 const loadingMsgEl = document.getElementById('loadingMessage');
+                 if (loadingMsgEl) loadingMsgEl.innerText = "Error initializing application UI. Please check console.";
+            }
+        });
+
+    </script>
+    
+    <div id="appContainer" x-data="appData" x-cloak class="min-h-screen flex flex-col">
+        <!-- Loading Message -->
+        <div id="loadingMessage" class="fixed inset-0 bg-white bg-opacity-75 flex items-center justify-center z-50 text-xl font-semibold">
+            Loading Booking System...
+        </div>
+
+        <!-- Main Content Area -->
+        <div id="mainContent" style="display: none;" class="flex-grow">
+            <!-- Header -->
+            <header class="bg-indigo-600 text-white shadow-lg">
+                <div class="container mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col sm:flex-row justify-between items-center">
+                    <h1 class="text-2xl sm:text-3xl font-bold tracking-tight">Sports Field Booking</h1>
+                    <div id="currentUserDisplay" class="text-xs mt-2 sm:mt-0"></div>
+                </div>
+            </header>
+
+            <!-- Navigation Tabs -->
+            <nav class="bg-white shadow-md">
+                <div class="container mx-auto px-4 sm:px-6 lg:px-8">
+                    <div class="flex border-b border-gray-200">
+                        <button @click="setView('schedule')" :class="{ 'tab-active': currentView === 'schedule' }" class="py-3 px-4 font-medium text-gray-500 hover:text-indigo-600 border-b-2 border-transparent focus:outline-none">Book a Slot</button>
+                        <button @click="setView('myBookings')" :class="{ 'tab-active': currentView === 'myBookings' }" class="py-3 px-4 font-medium text-gray-500 hover:text-indigo-600 border-b-2 border-transparent focus:outline-none">My Bookings</button>
+                        <button @click="setView('adminBookings')" :class="{ 'tab-active': currentView === 'adminBookings' }" class="py-3 px-4 font-medium text-gray-500 hover:text-indigo-600 border-b-2 border-transparent focus:outline-none">Admin View</button>
+                    </div>
+                </div>
+            </nav>
+
+            <!-- Content Area based on currentView -->
+            <main class="container mx-auto p-4 sm:p-6 lg:p-8 flex-grow">
+                <!-- Global Message Display -->
+                 <div x-show="message.text" 
+                     :class="{ 'bg-green-100 border-green-400 text-green-700': message.type === 'success', 
+                               'bg-red-100 border-red-400 text-red-700': message.type === 'error',
+                               'bg-blue-100 border-blue-400 text-blue-700': message.type === 'info' }"
+                     class="border px-4 py-3 rounded-md relative mb-4" role="alert">
+                    <span class="block sm:inline" x-text="message.text"></span>
+                    <span @click="message.text = ''" class="absolute top-0 bottom-0 right-0 px-4 py-3 cursor-pointer">
+                        <svg class="fill-current h-6 w-6" role="button" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><title>Close</title><path d="M14.348 14.849a1.2 1.2 0 0 1-1.697 0L10 11.819l-2.651 3.029a1.2 1.2 0 1 1-1.697-1.697l2.758-3.15-2.759-3.152a1.2 1.2 0 1 1 1.697-1.697L10 8.183l2.651-3.031a1.2 1.2 0 1 1 1.697 1.697l-2.758 3.152 2.758 3.15a1.2 1.2 0 0 1 0 1.698z"/></svg>
+                    </span>
+                </div>
+                
+                <!-- Loading Spinner for async operations -->
+                <div x-show="isLoading" class="flex justify-center items-center my-8">
+                    <svg class="animate-spin -ml-1 mr-3 h-8 w-8 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span class="text-lg text-gray-700">Loading...</span>
+                </div>
+
+                <!-- Schedule View -->
+                <div x-show="currentView === 'schedule' && !isLoading">
+                    <h2 class="text-2xl font-semibold mb-6 text-gray-700" x-text="`Available Slots for ${field.name}`"></h2>
+                    
+                    <div class="mb-6 bg-white p-6 rounded-lg shadow">
+                        <label for="bookingDate" class="block text-sm font-medium text-gray-700 mb-1">Select Date:</label>
+                        <input type="date" id="bookingDate" name="bookingDate" :value="selectedDate" @change="handleDateChange($event)" 
+                               :min="new Date().toISOString().split('T')[0]" class="mt-1 block w-full sm:w-1/2 md:w-1/3 rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2">
+                        <p class="mt-2 text-lg font-medium text-gray-900" x-text="`Showing slots for: ${formatDateOnly(selectedDate)}`"></p>
+                        
+                        <!-- Gemini Suggestion Button and Display -->
+                        <div class="mt-4">
+                            <button @click="getGeminiScheduleSuggestion()" :disabled="isGeminiLoading"
+                                    class="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-4 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50">
+                                <span x-show="!isGeminiLoading">✨ Suggest Best Times for <span x-text="formatDateOnly(selectedDate)"></span></span>
+                                <span x-show="isGeminiLoading">✨ Thinking...</span>
+                            </button>
+                            <div x-show="geminiSuggestion" class="mt-3 p-4 bg-purple-50 border border-purple-200 rounded-md text-sm text-purple-700 whitespace-pre-wrap" x-text="geminiSuggestion">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 mb-6">
+                        <template x-for="slot in timeSlots" :key="slot.startTime">
+                            <button @click="selectSlot(slot)" 
+                                    :class="getSlotStatusClass(slot)"
+                                    :disabled="isSlotBooked(slot.startTime)"
+                                    class="slot p-3 border rounded-lg text-center cursor-pointer focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                <span class="block text-sm font-medium" x-text="`${slot.startTime} - ${slot.endTime}`"></span>
+                                <span x-show="isSlotBooked(slot.startTime)" class="text-xs text-red-600 block">(Booked)</span>
+                            </button>
+                        </template>
+                         <div x-show="timeSlots.length === 0 && !isLoading" class="col-span-full text-center py-8 text-gray-500">
+                            No time slots configured for this field.
+                        </div>
+                    </div>
+                    
+                    <div x-show="selectedSlot" class="mt-6 bg-white p-6 rounded-lg shadow">
+                        <h3 class="text-xl font-semibold mb-2">Booking Summary</h3>
+                        <p><strong>Field:</strong> <span x-text="field.name"></span></p>
+                        <p><strong>Date:</strong> <span x-text="formatDateOnly(selectedDate)"></span></p>
+                        <p><strong>Time:</strong> <span x-text="`${selectedSlot?.startTime} - ${selectedSlot?.endTime}`"></span></p>
+                        <p><strong>Price:</strong> <span x-text="`₦${field.hourlyRateNGN.toLocaleString()}`"></span></p>
+                        
+                        <button @click="openModal('bookingModal')" class="mt-4 w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            Proceed to Book
+                        </button>
+                    </div>
+                     <div x-show="!selectedSlot && timeSlots.length > 0 && !isLoading" class="mt-6 text-center text-gray-600">
+                        Please select an available time slot above to proceed.
+                    </div>
+                </div>
+
+                <!-- My Bookings View -->
+                <div x-show="currentView === 'myBookings' && !isLoading">
+                    <h2 class="text-2xl font-semibold mb-6 text-gray-700">My Bookings</h2>
+                    <div x-show="myBookings.length === 0 && !isLoading" class="text-gray-600 text-center py-8">You have no bookings yet.</div>
+                    <div class="space-y-4">
+                        <template x-for="booking in myBookings" :key="booking.id">
+                            <div class="bg-white p-4 rounded-lg shadow-md border-l-4" :class="getStatusColor(booking.status)">
+                                <div class="flex flex-col sm:flex-row justify-between items-start">
+                                    <div>
+                                        <h3 class="text-lg font-semibold text-indigo-700" x-text="`${booking.fieldName} - ${formatDateOnly(booking.bookingDate)}`"></h3>
+                                        <p class="text-sm text-gray-600" x-text="`Time: ${booking.startTime} - ${booking.endTime}`"></p>
+                                        <p class="text-sm text-gray-600" x-text="`Price: ₦${booking.priceNGN.toLocaleString()}`"></p>
+                                        <p class="text-sm text-gray-600" x-text="`Booked on: ${formatDate(booking.bookedAt)}`"></p>
+                                        <p x-show="booking.paymentReference" class="text-xs text-gray-500" x-text="`Payment Ref: ${booking.paymentReference}`"></p>
+                                    </div>
+                                    <div class="mt-2 sm:mt-0 sm:text-right">
+                                        <span class="px-3 py-1 text-xs font-semibold rounded-full" :class="getStatusColor(booking.status)" x-text="booking.status.replace(/_/g, ' ').toUpperCase()"></span>
+                                         <button x-show="booking.status === 'pending_approval' || booking.status === 'confirmed'" @click="promptCancelBooking(booking.id)" 
+                                                class="mt-2 ml-0 sm:ml-2 text-xs bg-red-500 hover:bg-red-600 text-white font-medium py-1 px-3 rounded-md">
+                                            Cancel Booking
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+
+                <!-- Admin Bookings View -->
+                <div x-show="currentView === 'adminBookings' && !isLoading">
+                    <h2 class="text-2xl font-semibold mb-6 text-gray-700">Admin - All Bookings</h2>
+                     <div x-show="allBookingsAdmin.length === 0 && !isLoading" class="text-gray-600 text-center py-8">No bookings found in the system.</div>
+                    <div class="overflow-x-auto bg-white rounded-lg shadow">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">User</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Field & Date</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Price</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Booked At</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody class="bg-white divide-y divide-gray-200">
+                                <template x-for="booking in allBookingsAdmin" :key="booking.id">
+                                    <tr>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="text-sm text-gray-900" x-text="booking.userName"></div>
+                                            <div class="text-xs text-gray-500" x-text="booking.userEmail"></div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <div class="text-sm text-gray-900" x-text="booking.fieldName"></div>
+                                            <div class="text-xs text-gray-500" x-text="formatDateOnly(booking.bookingDate)"></div>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" x-text="`${booking.startTime} - ${booking.endTime}`"></td>
+                                        <td class="px-6 py-4 whitespace-nowrap">
+                                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full" :class="getStatusColor(booking.status)" x-text="booking.status.replace(/_/g, ' ').toUpperCase()"></span>
+                                        </td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" x-text="`₦${booking.priceNGN.toLocaleString()}`"></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500" x-text="formatDate(booking.bookedAt)"></td>
+                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                            <button x-show="booking.status === 'pending_approval'" @click="approveBooking(booking.id)" class="text-indigo-600 hover:text-indigo-900 mr-2">Approve</button>
+                                            <button x-show="booking.status === 'pending_approval' || booking.status === 'confirmed'" @click="rejectBooking(booking.id)" class="text-red-600 hover:text-red-900">Reject</button>
+                                            <span x-show="booking.status !== 'pending_approval' && booking.status !== 'confirmed'" class="text-xs text-gray-400">No actions</span>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </main>
+        </div> <!-- End Main Content -->
+
+        <!-- Booking Confirmation Modal -->
+        <div id="bookingModal" class="modal">
+            <div class="modal-content bg-white p-6 rounded-lg shadow-xl">
+                <span @click="closeModal('bookingModal')" class="close-button">&times;</span>
+                <h3 class="text-xl font-semibold mb-4 text-gray-800">Confirm Your Booking</h3>
+                
+                <div x-show="isLoading && currentView === 'schedule'" class="flex justify-center items-center my-4"> 
+                    <svg class="animate-spin h-6 w-6 text-indigo-600 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span class="text-gray-700">Processing...</span>
+                </div>
+
+                <div x-show="!(isLoading && currentView === 'schedule')">
+                    <div class="mb-4">
+                        <p><strong>Field:</strong> <span x-text="field.name"></span></p>
+                        <p><strong>Date:</strong> <span x-text="formatDateOnly(selectedDate)"></span></p>
+                        <p><strong>Time:</strong> <span x-text="selectedSlot ? `${selectedSlot.startTime} - ${selectedSlot.endTime}` : ''"></span></p>
+                        <p class="text-lg font-bold"><strong>Total:</strong> <span x-text="`₦${field.hourlyRateNGN.toLocaleString()}`"></span></p>
+                    </div>
+                    <div class="mb-4">
+                        <label for="userNameModal" class="block text-sm font-medium text-gray-700">Full Name:</label>
+                        <input type="text" id="userNameModal" x-model="userName" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2" placeholder="Enter your full name">
+                    </div>
+                    <div class="mb-6">
+                        <label for="userEmailModal" class="block text-sm font-medium text-gray-700">Email Address:</label>
+                        <input type="email" id="userEmailModal" x-model="userEmail" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2" placeholder="Enter your email for confirmation">
+                    </div>
+                    <button @click="submitBooking()" class="w-full bg-green-500 hover:bg-green-600 text-white font-semibold py-2.5 px-4 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500">
+                        Pay ₦<span x-text="field.hourlyRateNGN.toLocaleString()"></span> with Paystack
+                    </button>
+                    <button @click="closeModal('bookingModal')" class="mt-2 w-full bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Cancellation Confirmation Modal -->
+        <div id="cancelConfirmModal" class="modal">
+            <div class="modal-content bg-white p-6 rounded-lg shadow-xl">
+                <h3 class="text-xl font-semibold mb-4 text-gray-800">Confirm Cancellation</h3>
+                <p class="mb-6 text-gray-700">Are you sure you want to cancel this booking? This action cannot be undone.</p>
+                <div x-show="isLoading && bookingToCancelId" class="flex justify-center items-center my-4"> 
+                     <svg class="animate-spin h-6 w-6 text-red-600 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <span class="text-gray-700">Cancelling...</span>
+                </div>
+                <div class="flex justify-end space-x-3" x-show="!(isLoading && bookingToCancelId)">
+                    <button @click="closeModal('cancelConfirmModal')" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-medium py-2 px-4 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400">
+                        No, Keep Booking
+                    </button>
+                    <button @click="executeCancellation()" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                        Yes, Cancel Booking
+                    </button>
+                </div>
+            </div>
+        </div>
+
+
+        <footer class="text-center py-8 text-sm text-gray-500 border-t border-gray-200 mt-auto">
+            <p>&copy; <span x-text="new Date().getFullYear()"></span> Sports Field Booking. All rights reserved.</p>
+            <p class="text-xs mt-1">App ID: <span x-text="typeof appId !== 'undefined' ? appId : 'default-app-id'"></span></p>
+        </footer>
+
+    </div> <!-- End App Container -->
+    
+    <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+</body>
+</html>
